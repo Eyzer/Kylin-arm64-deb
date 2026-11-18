@@ -1,0 +1,1214 @@
+diff --git a/.github/workflows/kylin-arm64-deb.yml b/.github/workflows/kylin-arm64-deb.yml
+new file mode 100644
+index 0000000..eacb7bd
+--- /dev/null
++++ b/.github/workflows/kylin-arm64-deb.yml
+@@ -0,0 +1,81 @@
++name: Kylin V10 ARM64 Deb
++
++on:
++  push:
++    branches: [kylin-v10]
++  workflow_dispatch:
++  workflow_call:
++
++permissions:
++  contents: read
++
++jobs:
++  build-linux-arm64:
++    # Debian 11 = glibc 2.31 + WebKitGTK 4.0，麒麟 V10 可直接安装。
++    # node:20-bullseye 自带 git / Node 20 / 构建链，容器任务里的 checkout 才能跑。
++    name: Build Linux ARM64 (Kylin V10 / Debian 11 Compatible Deb)
++    runs-on: ubuntu-24.04-arm
++    container:
++      image: node:20-bullseye
++    steps:
++      - name: Checkout repository
++        uses: actions/checkout@v4
++
++      - name: Install system dependencies (glibc 2.31 toolchain)
++        run: |
++          # Debian 11 已归档，deb.debian.org 的 security 池包文件已清空，必须用归档源
++          printf '%s\n' \
++            'deb http://archive.debian.org/debian bullseye main' \
++            'deb http://archive.debian.org/debian-security bullseye-security main' \
++            > /etc/apt/sources.list
++          apt-get -o Acquire::Check-Valid-Until=false update
++          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
++            pkg-config file binutils ca-certificates curl \
++            libwebkit2gtk-4.0-dev libgtk-3-dev librsvg2-dev libssl-dev patchelf
++
++      - name: Install Rust toolchain
++        uses: dtolnay/rust-toolchain@stable
++
++      - name: Cache Rust build
++        uses: Swatinem/rust-cache@v2
++        with:
++          workspaces: src-tauri
++
++      - name: Install frontend dependencies
++        run: npm ci
++
++      - name: Build Linux ARM64 Deb
++        run: npm run tauri build -- --bundles deb
++
++      - name: Verify Kylin V10 compatibility
++        run: |
++          # Tauri 1 打包时会把 target/release/rimetune 重命名为 productName 的 kebab-case
++          BIN=src-tauri/target/release/rime-tune
++          if [ ! -f "$BIN" ]; then BIN=src-tauri/target/release/rimetune; fi
++          echo "=== NEEDED libraries ==="
++          readelf -d "$BIN" | grep NEEDED
++          if ! readelf -d "$BIN" | grep -q 'libwebkit2gtk-4.0.so'; then
++            echo "::error::二进制没有链接到 WebKitGTK 4.0"
++            exit 1
++          fi
++          MAX_GLIBC=$(readelf -V "$BIN" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V -u | tail -1)
++          echo "=== 最高 glibc 版本需求: GLIBC_$MAX_GLIBC ==="
++          if [ "$(printf '%s\n2.31\n' "$MAX_GLIBC" | sort -V | tail -1)" != "2.31" ]; then
++            echo "::error::需要 GLIBC_$MAX_GLIBC，高于麒麟 V10 的 2.31，包无法运行"
++            exit 1
++          fi
++          echo "=== Deb 包依赖 ==="
++          dpkg-deb -I src-tauri/target/release/bundle/deb/*.deb | grep -E 'Package|Architecture|Depends'
++
++      - name: Stage Linux ARM64 Artifacts
++        run: |
++          mkdir -p staging-linux-arm64
++          cp src-tauri/target/release/bundle/deb/*.deb staging-linux-arm64/
++          ls -la staging-linux-arm64/
++
++      - name: Upload Linux ARM64 Artifacts
++        uses: actions/upload-artifact@v4
++        with:
++          name: linux-arm64-artifacts
++          path: staging-linux-arm64/*
++          if-no-files-found: error
+diff --git a/.github/workflows/release-multiplatform.yml b/.github/workflows/release-multiplatform.yml
+index 17af0a4..4b6d148 100644
+--- a/.github/workflows/release-multiplatform.yml
++++ b/.github/workflows/release-multiplatform.yml
+@@ -108,13 +108,13 @@ jobs:
+       - name: Install Linux dependencies
+         run: |
+           sudo apt-get update
+-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev build-essential libfuse2
++          sudo apt-get install -y libwebkit2gtk-4.0-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev build-essential libfuse2
+ 
+       - name: Install frontend dependencies
+         run: npm ci
+ 
+       - name: Build Linux Bundles (Deb & AppImage)
+-        run: npm run tauri build
++        run: npm run tauri build -- --bundles deb,appimage
+ 
+       - name: Stage Linux Artifacts
+         run: |
+@@ -131,48 +131,13 @@ jobs:
+           if-no-files-found: error
+ 
+   build-linux-arm64:
+-    name: Build Linux ARM64 (Deb & AppImage for Raspberry Pi)
+-    runs-on: ubuntu-24.04-arm
+-    steps:
+-      - name: Checkout repository
+-        uses: actions/checkout@v4
+-
+-      - name: Setup Node.js
+-        uses: actions/setup-node@v4
+-        with:
+-          node-version: 20
+-          cache: 'npm'
+-
+-      - name: Install Rust toolchain
+-        uses: dtolnay/rust-toolchain@stable
+-
+-      - name: Install Linux ARM64 dependencies
+-        run: |
+-          sudo apt-get update
+-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev build-essential libfuse2
+-
+-      - name: Install frontend dependencies
+-        run: npm ci
+-
+-      - name: Build Linux ARM64 Bundles (Deb & AppImage)
+-        run: npm run tauri build
+-
+-      - name: Stage Linux ARM64 Artifacts
+-        run: |
+-          mkdir -p staging-linux-arm64
+-          cp src-tauri/target/release/bundle/deb/*.deb staging-linux-arm64/ || true
+-          cp src-tauri/target/release/bundle/appimage/*.AppImage staging-linux-arm64/ || true
+-          ls -la staging-linux-arm64/
+-
+-      - name: Upload Linux ARM64 Artifacts
+-        uses: actions/upload-artifact@v4
+-        with:
+-          name: linux-arm64-artifacts
+-          path: staging-linux-arm64/*
+-          if-no-files-found: error
++    name: Build Linux ARM64 (Kylin V10 / Debian 11 Compatible Deb)
++    uses: ./.github/workflows/kylin-arm64-deb.yml
+ 
+   publish-release:
+     name: Publish Multiplatform Release
++    # 手动触发（workflow_dispatch）时只产出构建工件，不创建 Release
++    if: startsWith(github.ref, 'refs/tags/')
+     needs: [build-windows, build-macos, build-linux, build-linux-arm64]
+     runs-on: ubuntu-latest
+     steps:
+@@ -226,8 +191,8 @@ jobs:
+             - **打字统计全平台支持与跨平台目录动态适配**：
+               - 配合 `extras/input_stats.lua` 采集器，在仪表盘侧边栏新增「打字统计」可视化看板（支持今日、近 7 天、近 30 天统计与 12 周活跃热力图）；
+               - 重构路径动态定位逻辑，彻底解决在 macOS、Linux 及自定义 Rime 用户路径下找不到数据文件的跨平台问题；
+-            - **新增 Linux ARM64 (树莓派 Raspberry Pi) 官方构建支持**：
+-              - 原生支持基于 64 位 Raspberry Pi OS、Ubuntu ARM64 等单板机环境，构建提供专用 ARM64 `.deb` 与 `.AppImage`；
++            - **新增 Linux ARM64 官方构建支持（兼容麒麟 V10）**：
++              - 在 Debian 11（glibc 2.31）环境中原生构建，运行时仅依赖 WebKitGTK 4.0，可在银河麒麟桌面 V10（arm64/飞腾/鲲鹏）、Debian 11、树莓派 64 位系统上直接安装运行；
+             - **WeaselTune 全新升级为 RimeTune 跨平台配置中心**：从原专属 Windows 小狼毫工具正式蜕变升级为统一的 Rime 中州韵全平台配置中心；
+             - **底层路径归一化重构**：消除跨系统环境下的路径解析差异，保障跨环境一致性；
+             - **万象拼音 Octagram 上下文语言模型完整支持**：
+@@ -246,9 +211,9 @@ jobs:
+               - `RimeTune.exe` / `RimeTune-windows-x64-portable.zip`：纯绿色免安装便携版（解压即用，原生无冗余）
+             - **🍎 macOS**：macOS 11 (Big Sur) 及以上（提供 Universal 通用架构 DMG，原生通吃 Apple Silicon M1/M2/M3/M4 与 Intel x86_64 处理器）
+               - `.dmg`：Universal 通用架构拖拽式安装镜像
+-            - **🐧 Linux (x86_64 与 ARM64 树莓派)**：Ubuntu 22.04+、Debian 11/12、Raspberry Pi OS (64位)、Arch Linux、Fedora 38+、Linux Mint、Deepin / 统信 UOS 等
+-              - `.AppImage`：免安装便携单文件（提供 x86_64 与 aarch64 双架构）
+-              - `.deb`：Debian / Ubuntu / 树莓派等标准安装包（提供 amd64 与 arm64 双架构）
++            - **🐧 Linux (x86_64 与 ARM64)**：Ubuntu 22.04+、Debian 11/12、银河麒麟桌面 V10（arm64）、Raspberry Pi OS (64位)、Arch Linux、Fedora 38+、Linux Mint、Deepin / 统信 UOS 等
++              - `.AppImage`：免安装便携单文件（x86_64）
++              - `.deb`：Debian / Ubuntu / 麒麟 V10 等标准安装包（提供 amd64 与 arm64 双架构，arm64 版基于 glibc 2.31 + WebKitGTK 4.0 构建）
+ 
+             ---
+ 
+diff --git a/README.md b/README.md
+index ba3c578..6a8592c 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+ 
+ RimeTune 是一款专为 **Rime（中州韵输入法引擎）全平台（Windows 小狼毫 Weasel、macOS 鼠须管 Squirrel、Linux ibus/fcitx5-rime）** 量身打造的现代图形化配置与管理中心。
+ 
+-基于 **Tauri 2.x + Rust + React 19 + TypeScript** 构建，具备极小体积、极速启动、多平台路径自动抹平、原生底层支持与高保真现代化视觉体验。
++基于 **Tauri 1.x + Rust + React 19 + TypeScript** 构建（使用 WebKitGTK 4.0，兼容银河麒麟 V10 等老系统），具备极小体积、极速启动、多平台路径自动抹平、原生底层支持与高保真现代化视觉体验。
+ 
+ ![dashboard](https://github.mianao.info/https://raw.githubusercontent.com/harry10086/picx-images-hosting/master/Rime/dashboard.webp)
+ 
+@@ -88,7 +88,7 @@ RimeTune 是一款专为 **Rime（中州韵输入法引擎）全平台（Windows
+ #### 🌐 通用核心依赖（全平台必需）
+ - **Node.js**：推荐版本 `v20.x` LTS 以上（自带 npm 包管理器）。
+   - 验证命令：`node -v`、`npm -v`
+-- **Rust 编译环境 (Rust toolchain)**：Tauri 2.x 底层由 Rust 驱动，需要 Rust 编译器与 Cargo 工具。
++- **Rust 编译环境 (Rust toolchain)**：Tauri 1.x 底层由 Rust 驱动，需要 Rust 编译器与 Cargo 工具。
+   - 安装方法：访问 [Rust 官方安装指南](https://www.rust-lang.org/tools/install) 安装 `rustup`。
+   - 验证命令：`rustc --version`、`cargo --version`
+ 
+@@ -103,29 +103,28 @@ RimeTune 是一款专为 **Rime（中州韵输入法引擎）全平台（Windows
+   ```
+ - *注：macOS 原生使用操作系统的 WebKit (WKWebView)，无需安装额外的 WebView 运行库。*
+ 
+-#### 🐧 Linux 环境补充 (Ubuntu / Debian / Arch / Fedora 等)
+-Linux 下需要安装 WebKitGTK 与 GTK3 等开发依赖库：
+-- **Ubuntu / Debian / Mint / Deepin / UOS**：
++#### 🐧 Linux 环境补充 (Ubuntu / Debian / Arch / Fedora / 麒麟 V10 等)
++Linux 下需要安装 WebKitGTK 4.0（libsoup2）与 GTK3 等开发依赖库：
++- **Ubuntu / Debian / Mint / Deepin / UOS / 银河麒麟 V10**：
+   ```bash
+   sudo apt-get update && sudo apt-get install -y \
+-    libwebkit2gtk-4.1-dev \
+-    libappindicator3-dev \
++    libwebkit2gtk-4.0-dev \
+     librsvg2-dev \
+     patchelf \
+     libssl-dev \
+     libgtk-3-dev \
+     build-essential
+   ```
++  麒麟 V10 官方源只提供 WebKitGTK 4.0（运行时包 `libwebkit2gtk-4.0-37`），因此本项目使用 Tauri 1.x；请勿升级到 Tauri 2.x（其强制要求 4.1，麒麟 V10 无此包）。
+ - **Arch Linux / Manjaro**：
+   ```bash
+-  sudo pacman -S webkit2gtk-4.1 base-devel openssl libappindicator-gtk3 librsvg patchelf
++  sudo pacman -S webkit2gtk-4.0 base-devel openssl librsvg patchelf
+   ```
+ - **Fedora / RHEL**：
+   ```bash
+   sudo dnf install \
+-    webkit2gtk4.1-devel \
++    webkit2gtk4.0-devel \
+     openssl-devel \
+-    libappindicator-gtk3-devel \
+     librsvg2-devel \
+     @development-tools
+   ```
+@@ -208,7 +207,7 @@ npm run build:portable
+ ```
+ - **输出文件**：
+   - `.deb` 安装包（Ubuntu / Debian / 树莓派双击或 `sudo dpkg -i` 安装）：`src-tauri/target/release/bundle/deb/RimeTune_0.3.1_amd64.deb`（或 `_arm64.deb`）
+-  - `.AppImage` 免安装便携版（赋予执行权限 `chmod +x` 即可直接运行）：`src-tauri/target/release/bundle/appimage/RimeTune_0.3.1_amd64.AppImage`（或 `_aarch64.AppImage`）
++  - `.AppImage` 免安装便携版（赋予执行权限 `chmod +x` 即可直接运行）：`src-tauri/target/release/bundle/appimage/RimeTune_0.3.1_amd64.AppImage`
+   - 独立 ELF 二进制文件：`src-tauri/target/release/RimeTune`
+ 
+ ---
+@@ -239,8 +238,8 @@ npm run build:portable
+ - **Q: 树莓派 (Raspberry Pi) 或 ARM64 设备本地编译时卡死或被 Kill？**
+   - **原因**：Rust 编译阶段并行度高且消耗较多内存。若树莓派物理内存在 1GB~2GB，可能会因内存耗尽 (OOM) 导致进程退出。
+   - **解决**：在编译前临时配置 2GB~4GB Swap 交换空间，或者限制编译并发数（如 `CARGO_BUILD_JOBS=2 npm run tauri build`）。
+-- **Q: 编译报错 `Package 'webkit2gtk-4.1', not found` 或缺少 openssl**
+-  - **解决**：检查系统是否安装了 `libwebkit2gtk-4.1-dev`（Ubuntu/Debian）或 `webkit2gtk-4.1`（Arch），详见上方 Linux 依赖安装指南。
++- **Q: 编译报错 `Package 'webkit2gtk-4.0', not found` 或缺少 openssl**
++  - **解决**：检查系统是否安装了 `libwebkit2gtk-4.0-dev`（Ubuntu/Debian/麒麟）或 `webkit2gtk-4.0`（Arch），详见上方 Linux 依赖安装指南。
+ - **Q: Fcitx5-Rime 与 IBus-Rime 用户目录默认在哪里？**
+   - **Fcitx5-Rime**：`~/.local/share/fcitx5/rime` 或 `~/.config/fcitx5/rime`；
+   - **IBus-Rime**：`~/.config/ibus/rime`；
+diff --git a/package-lock.json b/package-lock.json
+index c5a0cea..ddb4298 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,15 +1,14 @@
+ {
+-  "name": "tauri-app",
+-  "version": "0.1.0",
++  "name": "rimetune",
++  "version": "0.3.1",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+-      "name": "tauri-app",
+-      "version": "0.1.0",
++      "name": "rimetune",
++      "version": "0.3.1",
+       "dependencies": {
+-        "@tauri-apps/api": "^2",
+-        "@tauri-apps/plugin-opener": "^2",
++        "@tauri-apps/api": "^1.6.0",
+         "clsx": "^2.1.1",
+         "lucide-react": "^1.48.0",
+         "react": "^19.1.0",
+@@ -17,7 +16,7 @@
+         "tailwind-merge": "^3.7.0"
+       },
+       "devDependencies": {
+-        "@tauri-apps/cli": "^2",
++        "@tauri-apps/cli": "^1.6.0",
+         "@types/react": "^19.1.8",
+         "@types/react-dom": "^19.1.6",
+         "@vitejs/plugin-react": "^6.0.2",
+@@ -271,21 +270,29 @@
+       "license": "MIT"
+     },
+     "node_modules/@tauri-apps/api": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/api/-/api-2.12.0.tgz",
+-      "integrity": "sha512-fUSxFX8VABYe9W9K5ROdEaKVkNUFRcMSRofjruvaxztXA+I0XnQHcYHF8m/a6iExRUxsUf0HsFWhPBuH9IgzJw==",
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/api/-/api-1.6.0.tgz",
++      "integrity": "sha512-rqI++FWClU5I2UBp4HXFvl+sBWkdigBkxnpJDQUWttNyG7IZP4FwQGhTNL5EOw0vI8i6eSAJ5frLqO7n7jbJdg==",
+       "license": "Apache-2.0 OR MIT",
++      "engines": {
++        "node": ">= 14.6.0",
++        "npm": ">= 6.6.0",
++        "yarn": ">= 1.19.1"
++      },
+       "funding": {
+         "type": "opencollective",
+         "url": "https://opencollective.com/tauri"
+       }
+     },
+     "node_modules/@tauri-apps/cli": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli/-/cli-2.12.0.tgz",
+-      "integrity": "sha512-GIShnAR4C16kSTA8NO02fo8fOw/I5z5sAUEB5S2HlPHFnBkbihL4c9a/MpkxOm1+q5S+tFd3X4QUjHWxfyGzpQ==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli/-/cli-1.6.3.tgz",
++      "integrity": "sha512-q46umd6QLRKDd4Gg6WyZBGa2fWvk0pbeUA5vFomm4uOs1/17LIciHv2iQ4UD+2Yv5H7AO8YiE1t50V0POiEGEw==",
+       "dev": true,
+       "license": "Apache-2.0 OR MIT",
++      "dependencies": {
++        "semver": ">=7.5.2"
++      },
+       "bin": {
+         "tauri": "tauri.js"
+       },
+@@ -297,28 +304,27 @@
+         "url": "https://opencollective.com/tauri"
+       },
+       "optionalDependencies": {
+-        "@tauri-apps/cli-darwin-arm64": "2.12.0",
+-        "@tauri-apps/cli-darwin-x64": "2.12.0",
+-        "@tauri-apps/cli-linux-arm-gnueabihf": "2.12.0",
+-        "@tauri-apps/cli-linux-arm64-gnu": "2.12.0",
+-        "@tauri-apps/cli-linux-arm64-musl": "2.12.0",
+-        "@tauri-apps/cli-linux-riscv64-gnu": "2.12.0",
+-        "@tauri-apps/cli-linux-x64-gnu": "2.12.0",
+-        "@tauri-apps/cli-linux-x64-musl": "2.12.0",
+-        "@tauri-apps/cli-win32-arm64-msvc": "2.12.0",
+-        "@tauri-apps/cli-win32-ia32-msvc": "2.12.0",
+-        "@tauri-apps/cli-win32-x64-msvc": "2.12.0"
++        "@tauri-apps/cli-darwin-arm64": "1.6.3",
++        "@tauri-apps/cli-darwin-x64": "1.6.3",
++        "@tauri-apps/cli-linux-arm-gnueabihf": "1.6.3",
++        "@tauri-apps/cli-linux-arm64-gnu": "1.6.3",
++        "@tauri-apps/cli-linux-arm64-musl": "1.6.3",
++        "@tauri-apps/cli-linux-x64-gnu": "1.6.3",
++        "@tauri-apps/cli-linux-x64-musl": "1.6.3",
++        "@tauri-apps/cli-win32-arm64-msvc": "1.6.3",
++        "@tauri-apps/cli-win32-ia32-msvc": "1.6.3",
++        "@tauri-apps/cli-win32-x64-msvc": "1.6.3"
+       }
+     },
+     "node_modules/@tauri-apps/cli-darwin-arm64": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-darwin-arm64/-/cli-darwin-arm64-2.12.0.tgz",
+-      "integrity": "sha512-v5J+jISihLGtih1+3yWagbsL+5dbLZORu4vaSI0vhY0Heb+MAW+T/1s1RyKxrQrwEPGBG5kqwfDDTnSbmVkuqA==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli-darwin-arm64/-/cli-darwin-arm64-1.6.3.tgz",
++      "integrity": "sha512-fQN6IYSL8bG4NvkdKE4sAGF4dF/QqqQq4hOAU+t8ksOzHJr0hUlJYfncFeJYutr/MMkdF7hYKadSb0j5EE9r0A==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "license": "Apache-2.0 OR MIT",
++      "license": "MIT",
+       "optional": true,
+       "os": [
+         "darwin"
+@@ -328,14 +334,14 @@
+       }
+     },
+     "node_modules/@tauri-apps/cli-darwin-x64": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-darwin-x64/-/cli-darwin-x64-2.12.0.tgz",
+-      "integrity": "sha512-g27I07pfW/dMS8vcNqB9lamgKF0TqLlcy8e7t9qDGsB1iaeyjJWb2TgBF4tM9ZwLqPAZUXbsz28oXljO12WC4g==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli-darwin-x64/-/cli-darwin-x64-1.6.3.tgz",
++      "integrity": "sha512-1yTXZzLajKAYINJOJhZfmMhCzweHSgKQ3bEgJSn6t+1vFkOgY8Yx4oFgWcybrrWI5J1ZLZAl47+LPOY81dLcyA==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "license": "Apache-2.0 OR MIT",
++      "license": "MIT",
+       "optional": true,
+       "os": [
+         "darwin"
+@@ -345,14 +351,14 @@
+       }
+     },
+     "node_modules/@tauri-apps/cli-linux-arm-gnueabihf": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-linux-arm-gnueabihf/-/cli-linux-arm-gnueabihf-2.12.0.tgz",
+-      "integrity": "sha512-gXyQ710fNc99YuxFxNyeX9PLSrIpbtgBBj7GQo9tSeRT6fIK40q3/gm7X5jqZo7mWLR2m0R/2ALd3vAWo0Z32Q==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm-gnueabihf/-/cli-linux-arm-gnueabihf-1.6.3.tgz",
++      "integrity": "sha512-CjTEr9r9xgjcvos09AQw8QMRPuH152B1jvlZt4PfAsyJNPFigzuwed5/SF7XAd8bFikA7zArP4UT12RdBxrx7w==",
+       "cpu": [
+         "arm"
+       ],
+       "dev": true,
+-      "license": "Apache-2.0 OR MIT",
++      "license": "MIT",
+       "optional": true,
+       "os": [
+         "linux"
+@@ -362,14 +368,14 @@
+       }
+     },
+     "node_modules/@tauri-apps/cli-linux-arm64-gnu": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-linux-arm64-gnu/-/cli-linux-arm64-gnu-2.12.0.tgz",
+-      "integrity": "sha512-H9cyXuq9WgxoHh2NZ+R+oN+W78x5UwaBDEp0/fmqUUkaBoioCuOZErM9xKiIV6bpNAhmw1RoWZ49u37q/vaiAg==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm64-gnu/-/cli-linux-arm64-gnu-1.6.3.tgz",
++      "integrity": "sha512-G9EUUS4M8M/Jz1UKZqvJmQQCKOzgTb8/0jZKvfBuGfh5AjFBu8LHvlFpwkKVm1l4951Xg4ulUp6P9Q7WRJ9XSA==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "license": "Apache-2.0 OR MIT",
++      "license": "MIT",
+       "optional": true,
+       "os": [
+         "linux"
+@@ -379,31 +385,14 @@
+       }
+     },
+     "node_modules/@tauri-apps/cli-linux-arm64-musl": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-linux-arm64-musl/-/cli-linux-arm64-musl-2.12.0.tgz",
+-      "integrity": "sha512-5tFuk3JKMBa1M/iN4gN32OYlSfhY3aqb5PO3zCugxaT+sfecyMKpc3EM9VDbhmwWBE9QD4Tfj7wGhlqx2yy2pQ==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm64-musl/-/cli-linux-arm64-musl-1.6.3.tgz",
++      "integrity": "sha512-MuBTHJyNpZRbPVG8IZBN8+Zs7aKqwD22tkWVBcL1yOGL4zNNTJlkfL+zs5qxRnHlUsn6YAlbW/5HKocfpxVwBw==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "license": "Apache-2.0 OR MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/@tauri-apps/cli-linux-riscv64-gnu": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-linux-riscv64-gnu/-/cli-linux-riscv64-gnu-2.12.0.tgz",
+-      "integrity": "sha512-LOrMyV+nb7pKq8P0BZtTBQuyzm1ORjn16R9MlupmxuT5LqxtuYJlw3VMwbaeXCToJ8jbP5u9JnkfmbqDlvETXw==",
+-      "cpu": [
+-        "riscv64"
+-      ],
+-      "dev": true,
+-      "license": "Apache-2.0 OR MIT",
++      "license": "MIT",
+       "optional": true,
+       "os": [
+         "linux"
+@@ -413,14 +402,14 @@
+       }
+     },
+     "node_modules/@tauri-apps/cli-linux-x64-gnu": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-linux-x64-gnu/-/cli-linux-x64-gnu-2.12.0.tgz",
+-      "integrity": "sha512-aMIkI+X9qvD2+k80QZB3tuOYT41/cEheikC510CwAIZ31KLXORsRASYYzM4mi1/58ICmtzSLFhCC08keir7COw==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-gnu/-/cli-linux-x64-gnu-1.6.3.tgz",
++      "integrity": "sha512-Uvi7M+NK3tAjCZEY1WGel+dFlzJmqcvu3KND+nqa22762NFmOuBIZ4KJR/IQHfpEYqKFNUhJfCGnpUDfiC3Oxg==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "license": "Apache-2.0 OR MIT",
++      "license": "MIT",
+       "optional": true,
+       "os": [
+         "linux"
+@@ -430,14 +419,14 @@
+       }
+     },
+     "node_modules/@tauri-apps/cli-linux-x64-musl": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-linux-x64-musl/-/cli-linux-x64-musl-2.12.0.tgz",
+-      "integrity": "sha512-9gl3NhUbfuGhSKjeGCypKSdtoezOQRcDUrkhTWtLQEjnajets6peO6NadgI2DF0OzbiiFOzrnnIGMwBS+Ap6Iw==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-musl/-/cli-linux-x64-musl-1.6.3.tgz",
++      "integrity": "sha512-rc6B342C0ra8VezB/OJom9j/N+9oW4VRA4qMxS2f4bHY2B/z3J9NPOe6GOILeg4v/CV62ojkLsC3/K/CeF3fqQ==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "license": "Apache-2.0 OR MIT",
++      "license": "MIT",
+       "optional": true,
+       "os": [
+         "linux"
+@@ -447,14 +436,14 @@
+       }
+     },
+     "node_modules/@tauri-apps/cli-win32-arm64-msvc": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-win32-arm64-msvc/-/cli-win32-arm64-msvc-2.12.0.tgz",
+-      "integrity": "sha512-1W+v86wsYLuyBDN0iDessD4CD9o+yNyO0m8Dp3+/vfjiZrJ/v7R7/aTRBeikaq2tLGgxeag0gxnFggBNBGw91A==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli-win32-arm64-msvc/-/cli-win32-arm64-msvc-1.6.3.tgz",
++      "integrity": "sha512-cSH2qOBYuYC4UVIFtrc1YsGfc5tfYrotoHrpTvRjUGu0VywvmyNk82+ZsHEnWZ2UHmu3l3lXIGRqSWveLln0xg==",
+       "cpu": [
+         "arm64"
+       ],
+       "dev": true,
+-      "license": "Apache-2.0 OR MIT",
++      "license": "MIT",
+       "optional": true,
+       "os": [
+         "win32"
+@@ -464,14 +453,14 @@
+       }
+     },
+     "node_modules/@tauri-apps/cli-win32-ia32-msvc": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-win32-ia32-msvc/-/cli-win32-ia32-msvc-2.12.0.tgz",
+-      "integrity": "sha512-SsBjvq4f7YaBGqcWoE3cycoItPf0SrQeqFqWWgfxoeZWAIz01E31LDSeZ2p/etJiIY0R9oi045chkFfb0O7WGw==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli-win32-ia32-msvc/-/cli-win32-ia32-msvc-1.6.3.tgz",
++      "integrity": "sha512-T8V6SJQqE4PSWmYBl0ChQVmS6AR2hXFHURH2DwAhgSGSQ6uBXgwlYFcfIeQpBQA727K2Eq8X2hGfvmoySyHMRw==",
+       "cpu": [
+         "ia32"
+       ],
+       "dev": true,
+-      "license": "Apache-2.0 OR MIT",
++      "license": "MIT",
+       "optional": true,
+       "os": [
+         "win32"
+@@ -481,14 +470,14 @@
+       }
+     },
+     "node_modules/@tauri-apps/cli-win32-x64-msvc": {
+-      "version": "2.12.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/cli-win32-x64-msvc/-/cli-win32-x64-msvc-2.12.0.tgz",
+-      "integrity": "sha512-9zzDKYUH4TKKBgRdDdVQX8fiRO5gJ8hD1nGsHU9DOHG5Jpm3arjbu9Xg1frR20EusG3Sl8X0dppoO/4EoUXUGg==",
++      "version": "1.6.3",
++      "resolved": "https://registry.npmjs.org/@tauri-apps/cli-win32-x64-msvc/-/cli-win32-x64-msvc-1.6.3.tgz",
++      "integrity": "sha512-HUkWZ+lYHI/Gjkh2QjHD/OBDpqLVmvjZGpLK9losur1Eg974Jip6k+vsoTUxQBCBDfj30eDBct9E1FvXOspWeg==",
+       "cpu": [
+         "x64"
+       ],
+       "dev": true,
+-      "license": "Apache-2.0 OR MIT",
++      "license": "MIT",
+       "optional": true,
+       "os": [
+         "win32"
+@@ -497,15 +486,6 @@
+         "node": ">= 10"
+       }
+     },
+-    "node_modules/@tauri-apps/plugin-opener": {
+-      "version": "2.6.0",
+-      "resolved": "https://registry.npmmirror.com/@tauri-apps/plugin-opener/-/plugin-opener-2.6.0.tgz",
+-      "integrity": "sha512-KIl9qkBGyAUrbzfCtdk+NRPTXUOwpMyUKsKN57H6/qA0q8auVywXpfUyWClqX6I/iH8PHmqAUa/KK9YZPWVQew==",
+-      "license": "MIT OR Apache-2.0",
+-      "dependencies": {
+-        "@tauri-apps/api": "^2.12.0"
+-      }
+-    },
+     "node_modules/@types/react": {
+       "version": "19.3.0",
+       "resolved": "https://registry.npmmirror.com/@types/react/-/react-19.3.0.tgz",
+@@ -860,6 +840,19 @@
+       "integrity": "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==",
+       "license": "MIT"
+     },
++    "node_modules/semver": {
++      "version": "7.8.6",
++      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.6.tgz",
++      "integrity": "sha512-9lpSSU4Mly3mrtruwLs1eLK6+gzbzqeBFwRNjIjE+9LuDpWdYctrQlQ3ej1Ilgi7gknpsTRnPoLP8DpCHqHIJw==",
++      "dev": true,
++      "license": "ISC",
++      "bin": {
++        "semver": "bin/semver.js"
++      },
++      "engines": {
++        "node": ">=10"
++      }
++    },
+     "node_modules/source-map-js": {
+       "version": "1.2.1",
+       "dev": true,
+diff --git a/package.json b/package.json
+index 96627de..5d7698f 100644
+--- a/package.json
++++ b/package.json
+@@ -6,14 +6,13 @@
+   "scripts": {
+     "dev": "vite",
+     "build": "tsc && vite build",
+-    "build:portable": "tauri build --no-bundle",
++    "build:portable": "tauri build --bundles none",
+     "build:installer": "tauri build",
+     "preview": "vite preview",
+     "tauri": "tauri"
+   },
+   "dependencies": {
+-    "@tauri-apps/api": "^2",
+-    "@tauri-apps/plugin-opener": "^2",
++    "@tauri-apps/api": "^1.6.0",
+     "clsx": "^2.1.1",
+     "lucide-react": "^1.48.0",
+     "react": "^19.1.0",
+@@ -21,7 +20,7 @@
+     "tailwind-merge": "^3.7.0"
+   },
+   "devDependencies": {
+-    "@tauri-apps/cli": "^2",
++    "@tauri-apps/cli": "^1.6.0",
+     "@types/react": "^19.1.8",
+     "@types/react-dom": "^19.1.6",
+     "@vitejs/plugin-react": "^6.0.2",
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index 8d1aec3..ea27446 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -15,15 +15,21 @@ name = "tauri_app_lib"
+ crate-type = ["staticlib", "cdylib", "rlib"]
+ 
+ [[bin]]
+-name = "RimeTune"
++name = "rimetune"
+ path = "src/main.rs"
+ 
++[features]
++# Tauri 1 生产构建时 CLI 会传 --features custom-protocol
++custom-protocol = ["tauri/custom-protocol"]
++
+ [build-dependencies]
+-tauri-build = { version = "2", features = [] }
++tauri-build = { version = "1", features = [] }
+ 
+ [dependencies]
+-tauri = { version = "2", features = [] }
+-tauri-plugin-opener = "2"
++# 使用 Tauri 1.x：Linux 后端依赖 WebKitGTK 4.0（libsoup2），
++# 可在麒麟 V10（glibc 2.31、libwebkit2gtk-4.0-37）等老系统上运行。
++# Tauri 2.x 强制要求 WebKitGTK 4.1（libsoup3），麒麟 V10 官方源未提供。
++tauri = { version = "1", features = ["shell-open"] }
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+ serde_yaml = "0.9"
+diff --git a/src-tauri/src/deployer.rs b/src-tauri/src/deployer.rs
+index 1d8bc92..73099ef 100644
+--- a/src-tauri/src/deployer.rs
++++ b/src-tauri/src/deployer.rs
+@@ -27,6 +27,17 @@ pub fn run_weasel_command(
+     custom_deployer: Option<String>,
+     success_msg: &str,
+ ) -> DeployResult {
++    #[cfg(target_os = "linux")]
++    {
++        if arg == "/sync" {
++            return DeployResult {
++                success: false,
++                message: "当前系统不支持自动同步，请手动执行 Rime 词库同步工具".to_string(),
++                deployer_used: String::new(),
++            };
++        }
++    }
++
+     // 1. 尝试获取互斥锁。如果已有部署任务正在进行，直接返回提示，避免重复执行争抢锁
+     if IS_DEPLOYING
+         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+@@ -56,7 +67,7 @@ pub fn run_weasel_command(
+     if deployer_path.is_empty() || !std::path::Path::new(&deployer_path).exists() {
+         return DeployResult {
+             success: false,
+-            message: "未找到 WeaselDeployer.exe 部署程序，请检查小狼毫安装路径".to_string(),
++            message: "未找到可用的部署程序，请检查输入法安装路径".to_string(),
+             deployer_used: String::new(),
+         };
+     }
+@@ -124,10 +135,75 @@ pub fn run_weasel_command(
+     }
+ }
+ 
++#[allow(unreachable_code)]
+ pub fn trigger_deploy(custom_deployer: Option<String>) -> DeployResult {
+-    run_weasel_command(
+-        "/deploy",
+-        custom_deployer,
+-        "重新部署指令已成功发送给小狼毫，配置与词库已刷新！",
+-    )
++    #[cfg(target_os = "linux")]
++    {
++        return linux_trigger_deploy(custom_deployer);
++    }
++    #[cfg(not(target_os = "linux"))]
++    {
++        run_weasel_command(
++            "/deploy",
++            custom_deployer,
++            "重新部署指令已发送，配置与词库已刷新！",
++        )
++    }
++}
++
++/// Linux 上让 fcitx5 / ibus 重新载入配置；配置已落盘时不把重载失败当成保存失败。
++#[cfg(target_os = "linux")]
++fn linux_trigger_deploy(custom_deployer: Option<String>) -> DeployResult {
++    let user_dir = crate::detector::fallback_rime_user_dir();
++    let mut cmds: Vec<(String, Vec<&str>)> = Vec::new();
++    if let Some(p) = custom_deployer
++        .filter(|p| !p.trim().is_empty() && std::path::Path::new(p).exists())
++    {
++        cmds.push((p, vec![]));
++    } else {
++        for bin in ["/usr/bin/fcitx5-remote", "/usr/local/bin/fcitx5-remote"] {
++            if std::path::Path::new(bin).exists() {
++                cmds.push((bin.to_string(), vec!["-r"]));
++                break;
++            }
++        }
++        for bin in ["/usr/bin/ibus", "/usr/local/bin/ibus"] {
++            if std::path::Path::new(bin).exists() {
++                cmds.push((bin.to_string(), vec!["restart"]));
++                break;
++            }
++        }
++    }
++    if cmds.is_empty() {
++        return DeployResult {
++            success: true,
++            message: format!(
++                "配置已写入 {}，未找到可自动重载的输入法，请手动重新部署 Rime",
++                user_dir
++            ),
++            deployer_used: String::new(),
++        };
++    }
++    let mut last_err = String::new();
++    for (bin, args) in &cmds {
++        match Command::new(bin).args(args).status() {
++            Ok(s) if s.success() => {
++                return DeployResult {
++                    success: true,
++                    message: format!("配置已保存，已通过 {} 重新载入输入法", bin),
++                    deployer_used: bin.clone(),
++                };
++            }
++            Ok(s) => last_err = format!("{} 返回 {}", bin, s),
++            Err(e) => last_err = format!("无法执行 {}: {}", bin, e),
++        }
++    }
++    DeployResult {
++        success: true,
++        message: format!(
++            "配置已保存；自动重载未成功（{}），请手动重新部署 Rime",
++            last_err
++        ),
++        deployer_used: String::new(),
++    }
+ }
+diff --git a/src-tauri/src/detector.rs b/src-tauri/src/detector.rs
+index e8aab32..3faf167 100644
+--- a/src-tauri/src/detector.rs
++++ b/src-tauri/src/detector.rs
+@@ -31,6 +31,79 @@ pub struct EnvironmentStatus {
+     pub available_grammar_models: Vec<GrammarModelItem>,
+ }
+ 
++/// 扫描 Linux 常见 Rime 用户目录，优先选含 Rime 特征文件的目录。
++#[cfg(target_os = "linux")]
++fn linux_rime_dir() -> Option<String> {
++    let home = std::env::var("HOME").ok()?;
++    let xdg = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", home));
++    let mut candidates = vec![
++        PathBuf::from(&home).join(".local/share/fcitx5/rime"),
++        PathBuf::from(&xdg).join("fcitx5/rime"),
++        PathBuf::from(&home).join(".config/ibus/rime"),
++        PathBuf::from(&xdg).join("fcitx/rime"),
++        PathBuf::from(&home).join(".local/share/fcitx/rime"),
++        PathBuf::from(&home).join(".fcitx/rime"),
++        PathBuf::from(&home).join(".rime"),
++        PathBuf::from(&xdg).join("rime"),
++    ];
++    for parent in [PathBuf::from(&xdg), PathBuf::from(&home).join(".local/share")] {
++        if let Ok(entries) = std::fs::read_dir(&parent) {
++            for e in entries.flatten() {
++                let p = e.path();
++                if p.is_dir() && p.file_name().and_then(|n| n.to_str()) == Some("rime") {
++                    candidates.push(p);
++                }
++            }
++        }
++    }
++    for c in &candidates {
++        if c.is_dir()
++            && (c.join("default.yaml").exists()
++                || c.join("default.custom.yaml").exists()
++                || c.join("installation.yaml").exists())
++        {
++            return Some(c.to_string_lossy().to_string());
++        }
++    }
++    candidates
++        .into_iter()
++        .find(|c| c.is_dir())
++        .map(|c| c.to_string_lossy().to_string())
++}
++
++/// Rime 用户目录兜底：支持 RIME_USER_DIR 手动指定；Linux 不再回退到 Windows 的 APPDATA。
++#[allow(unreachable_code)]
++pub fn fallback_rime_user_dir() -> String {
++    if let Ok(dir) = std::env::var("RIME_USER_DIR") {
++        if !dir.trim().is_empty() {
++            return dir.trim().to_string();
++        }
++    }
++    #[cfg(target_os = "linux")]
++    {
++        if let Some(d) = linux_rime_dir() {
++            return d;
++        }
++        let home = std::env::var("HOME").unwrap_or_default();
++        return PathBuf::from(&home)
++            .join(".local/share/fcitx5/rime")
++            .to_string_lossy()
++            .to_string();
++    }
++    #[cfg(target_os = "macos")]
++    {
++        let home = std::env::var("HOME").unwrap_or_default();
++        return PathBuf::from(&home).join("Library/Rime").to_string_lossy().to_string();
++    }
++    #[cfg(windows)]
++    {
++        return std::env::var("APPDATA")
++            .map(|a| PathBuf::from(a).join("Rime").to_string_lossy().to_string())
++            .unwrap_or_default();
++    }
++    String::new()
++}
++
+ pub fn detect_weasel_paths() -> (Option<String>, Option<String>, Option<String>) {
+     let mut weasel_root: Option<String> = None;
+     let mut user_dir: Option<String> = None;
+@@ -95,18 +168,8 @@ pub fn detect_weasel_paths() -> (Option<String>, Option<String>, Option<String>)
+ 
+     #[cfg(target_os = "linux")]
+     {
+-        if let Ok(home) = std::env::var("HOME") {
+-            let candidates = [
+-                PathBuf::from(&home).join(".local/share/fcitx5/rime"),
+-                PathBuf::from(&home).join(".config/fcitx5/rime"),
+-                PathBuf::from(&home).join(".config/ibus/rime"),
+-            ];
+-            for c in &candidates {
+-                if c.exists() {
+-                    user_dir = Some(c.to_string_lossy().to_string());
+-                    break;
+-                }
+-            }
++        if user_dir.is_none() {
++            user_dir = linux_rime_dir();
+         }
+     }
+ 
+@@ -167,19 +230,27 @@ pub fn detect_weasel_paths() -> (Option<String>, Option<String>, Option<String>)
+         }
+     }
+ 
++    if user_dir.is_none() {
++        let d = fallback_rime_user_dir();
++        if !d.is_empty() {
++            user_dir = Some(d);
++        }
++    }
++
+     (weasel_root, user_dir, deployer)
+ }
+ 
+ pub fn inspect_environment() -> EnvironmentStatus {
+     let (weasel_root_opt, user_dir_opt, deployer_opt) = detect_weasel_paths();
+-    let weasel_installed = deployer_opt.is_some();
+     let weasel_root = weasel_root_opt.unwrap_or_default();
+     let deployer_path = deployer_opt.unwrap_or_default();
+-    let rime_user_dir = user_dir_opt.unwrap_or_else(|| {
+-        std::env::var("APPDATA")
+-            .map(|a| PathBuf::from(a).join("Rime").to_string_lossy().to_string())
+-            .unwrap_or_default()
+-    });
++    let rime_user_dir = user_dir_opt.unwrap_or_else(fallback_rime_user_dir);
++    // Linux 上找不到部署程序不代表环境不可用，以 Rime 用户目录为准
++    let weasel_installed = if cfg!(target_os = "linux") {
++        Path::new(&rime_user_dir).is_dir() || !deployer_path.is_empty()
++    } else {
++        !deployer_path.is_empty()
++    };
+ 
+     let mut weasel_version = String::new();
+     if !weasel_root.is_empty() {
+@@ -199,8 +270,7 @@ pub fn inspect_environment() -> EnvironmentStatus {
+     let is_rime_ice_detected = user_path.join("rime_ice.schema.yaml").exists()
+         || user_path.join("rime_frost.schema.yaml").exists()
+         || user_path.join("rime_mint.schema.yaml").exists()
+-        || user_path.join("wanxiang.schema.yaml").exists()
+-        || Path::new(r"D:\GitHub\rime-ice\rime_ice.schema.yaml").exists();
++        || user_path.join("wanxiang.schema.yaml").exists();
+ 
+     // 查找已存在的 custom.yaml 补丁文件
+     let mut patch_files_found = Vec::new();
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index c1a8b65..b8c244a 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -299,8 +299,6 @@ fn parse_color_scheme_yaml(yaml_str: String) -> Result<patcher::ColorSchemeItem,
+     patcher::parse_color_scheme_yaml(&yaml_str)
+ }
+ 
+-use tauri::Manager;
+-
+ fn resolve_actual_user_dir(user_dir: Option<&str>) -> Result<String, String> {
+     if let Some(d) = user_dir {
+         if !d.trim().is_empty() {
+@@ -323,16 +321,7 @@ fn resolve_actual_user_dir(user_dir: Option<&str>) -> Result<String, String> {
+     }
+     #[cfg(target_os = "linux")]
+     {
+-        let home = std::env::var("HOME").map_err(|_| "无法定位用户 HOME 目录".to_string())?;
+-        let candidates = [
+-            std::path::PathBuf::from(&home).join(".local/share/fcitx5/rime"),
+-            std::path::PathBuf::from(&home).join(".config/fcitx5/rime"),
+-            std::path::PathBuf::from(&home).join(".config/ibus/rime"),
+-        ];
+-        let p = candidates.into_iter().find(|p| p.exists()).unwrap_or_else(|| {
+-            std::path::PathBuf::from(home).join(".local/share/fcitx5/rime")
+-        });
+-        Ok(p.to_string_lossy().to_string())
++        Ok(detector::fallback_rime_user_dir())
+     }
+     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+     {
+@@ -453,18 +442,8 @@ async fn set_typing_stats_enabled(user_dir: Option<String>, enabled: bool) -> Re
+     .map_err(|e| format!("调度打字统计切换任务失败: {e}"))?
+ }
+ 
+-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+ pub fn run() {
+     tauri::Builder::default()
+-        .plugin(tauri_plugin_opener::init())
+-        .setup(|app| {
+-            if let Some(window) = app.get_webview_window("main") {
+-                if let Some(icon) = app.default_window_icon() {
+-                    let _ = window.set_icon(icon.clone());
+-                }
+-            }
+-            Ok(())
+-        })
+         .invoke_handler(tauri::generate_handler![
+             get_environment_status,
+             get_full_config,
+diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
+index b767118..69efa18 100644
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -1,15 +1,22 @@
+ {
+-  "$schema": "https://schema.tauri.app/config/2",
+-  "productName": "RimeTune",
+-  "version": "0.3.1",
+-  "identifier": "com.rimetune.desktop",
+   "build": {
+     "beforeDevCommand": "npm run dev",
+-    "devUrl": "http://localhost:1420",
+     "beforeBuildCommand": "npm run build",
+-    "frontendDist": "../dist"
++    "devPath": "http://localhost:1420",
++    "distDir": "../dist",
++    "withGlobalTauri": false
+   },
+-  "app": {
++  "package": {
++    "productName": "RimeTune",
++    "version": "0.3.1"
++  },
++  "tauri": {
++    "allowlist": {
++      "all": false,
++      "shell": {
++        "open": true
++      }
++    },
+     "windows": [
+       {
+         "title": "RimeTune - 中州韵配置中心",
+@@ -21,17 +28,18 @@
+     ],
+     "security": {
+       "csp": null
++    },
++    "bundle": {
++      "active": true,
++      "targets": "all",
++      "identifier": "com.rimetune.desktop",
++      "icon": [
++        "icons/32x32.png",
++        "icons/128x128.png",
++        "icons/128x128@2x.png",
++        "icons/icon.icns",
++        "icons/icon.ico"
++      ]
+     }
+-  },
+-  "bundle": {
+-    "active": true,
+-    "targets": "all",
+-    "icon": [
+-      "icons/32x32.png",
+-      "icons/128x128.png",
+-      "icons/128x128@2x.png",
+-      "icons/icon.icns",
+-      "icons/icon.ico"
+-    ]
+   }
+ }
+diff --git a/src/App.tsx b/src/App.tsx
+index 1207d0e..5637ce7 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,5 +1,5 @@
+ import { useState, useEffect } from 'react';
+-import { invoke } from '@tauri-apps/api/core';
++import { invoke } from '@tauri-apps/api/tauri';
+ import {
+   EnvironmentStatus,
+   UnifiedFullConfig,
+@@ -68,8 +68,8 @@ export function App() {
+ 
+   const openRepoUrl = async () => {
+     try {
+-      const { openUrl } = await import('@tauri-apps/plugin-opener');
+-      await openUrl('https://github.com/harry10086/RimeTune');
++      const { open } = await import('@tauri-apps/api/shell');
++      await open('https://github.com/harry10086/RimeTune');
+     } catch {
+       window.open('https://github.com/harry10086/RimeTune', '_blank');
+     }
+@@ -125,12 +125,13 @@ export function App() {
+       setSnapshots(snaps);
+     } catch (err: any) {
+       console.warn('Tauri IPC 加载回退', err);
++      showToast('读取输入法环境失败，请确认已安装 Rime 后重新检测', 'error');
+       const mockEnv: EnvironmentStatus = {
+-        weasel_installed: true,
+-        weasel_version: '0.17.0',
+-        weasel_root: 'C:\\Program Files\\Rime\\weasel-0.17.0',
+-        deployer_path: 'C:\\Program Files\\Rime\\weasel-0.17.0\\WeaselDeployer.exe',
+-        rime_user_dir: 'C:\\Users\\Harry\\AppData\\Roaming\\Rime',
++        weasel_installed: false,
++        weasel_version: '',
++        weasel_root: '',
++        deployer_path: '',
++        rime_user_dir: '',
+         is_rime_ice_detected: true,
+         active_schema_id: 'rime_ice',
+         active_schema_name: '雾凇拼音',
+@@ -798,10 +799,10 @@ export function App() {
+               <RefreshCw size={28} color="var(--accent)" className="spin" />
+             </div>
+             <div style={{ fontSize: '18px', fontWeight: 800, color: 'var(--text-main)', letterSpacing: '-0.3px' }}>
+-              小狼毫正在重新部署中
++              输入法正在重新部署中
+             </div>
+             <p style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: '1.6', margin: 0 }}>
+-              正在后台调用小狼毫编译输入方案、词典索引与拼音映射。<br />
++              正在后台让输入法编译输入方案、词典索引与拼音映射。<br />
+               通常需要 <strong style={{ color: 'var(--text-main)' }}>3 ~ 10 秒</strong>，请耐心等待完成。<br />
+               <span style={{ color: '#fbbf24', fontSize: '12px', fontWeight: 600, display: 'inline-block', marginTop: '6px' }}>
+                 ⚡ 部署过程中窗口已安全保护，无需重复点击
+diff --git a/src/components/AppearanceView.tsx b/src/components/AppearanceView.tsx
+index 590c0b3..f35d969 100644
+--- a/src/components/AppearanceView.tsx
++++ b/src/components/AppearanceView.tsx
+@@ -23,7 +23,7 @@ import {
+   Download,
+   Copy,
+ } from 'lucide-react';
+-import { invoke } from '@tauri-apps/api/core';
++import { invoke } from '@tauri-apps/api/tauri';
+ 
+ interface AppearanceViewProps {
+   styleConfig: WeaselStyleConfig;
+diff --git a/src/components/BackupDiffView.tsx b/src/components/BackupDiffView.tsx
+index 771d3ee..979a77c 100644
+--- a/src/components/BackupDiffView.tsx
++++ b/src/components/BackupDiffView.tsx
+@@ -15,7 +15,7 @@ import {
+   AlertCircle,
+   Save,
+ } from 'lucide-react';
+-import { invoke } from '@tauri-apps/api/core';
++import { invoke } from '@tauri-apps/api/tauri';
+ 
+ interface BackupDiffViewProps {
+   snapshots: BackupSnapshot[];
+diff --git a/src/components/DashboardView.tsx b/src/components/DashboardView.tsx
+index 1e283e2..15f85f9 100644
+--- a/src/components/DashboardView.tsx
++++ b/src/components/DashboardView.tsx
+@@ -37,7 +37,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
+           <div>
+             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+               <span style={{ fontSize: '22px', fontWeight: 800, color: 'var(--text-main)', letterSpacing: '-0.3px' }}>
+-                小狼毫配置中心
++                输入法配置中心
+               </span>
+               <span
+                 style={{
+@@ -54,7 +54,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
+               </span>
+             </div>
+             <p style={{ color: 'var(--text-muted)', fontSize: '14px', maxWidth: '680px', lineHeight: '1.6' }}>
+-              安全同步小狼毫原生补丁（<span className="mono" style={{ color: 'var(--accent)', fontWeight: 600 }}>*.custom.yaml</span>）。不修改底层文件，升级词库防覆盖；修改后一键静默重新部署，无需右键托盘！
++              安全同步输入法原生补丁（<span className="mono" style={{ color: 'var(--accent)', fontWeight: 600 }}>*.custom.yaml</span>）。不修改底层文件，升级词库防覆盖；修改后一键静默重新部署，无需右键托盘！
+             </p>
+           </div>
+ 
+@@ -76,7 +76,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
+                 cursor: loading ? 'not-allowed' : 'pointer',
+                 transition: 'all 0.2s',
+               }}
+-              title="重新检测小狼毫安装与用户环境"
++              title="重新检测输入法安装与用户环境"
+             >
+               <RefreshCw size={15} className={loading ? 'spin' : ''} />
+               重新检测
+@@ -129,7 +129,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
+ 
+       {/* 状态诊断卡片网格 (高对比度、清晰字体) */}
+       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '16px' }}>
+-        {/* 小狼毫本体 */}
++        {/* 输入法本体 */}
+         <div
+           className="glass-panel glow-card"
+           style={{ padding: '20px', borderRadius: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}
+@@ -137,7 +137,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
+           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-dim)', fontSize: '13px', fontWeight: 600 }}>
+               <Cpu size={18} color="#38bdf8" />
+-              <span>小狼毫 (Weasel)</span>
++              <span>输入法环境</span>
+             </div>
+             {env?.weasel_installed ? (
+               <span style={{ color: '#34d399', fontSize: '13px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
+@@ -150,10 +150,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
+             )}
+           </div>
+           <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--text-main)' }}>
+-            版本: {env?.weasel_version || '0.17.x'}
++            重载方式: {env?.deployer_path || '自动检测'}
+           </div>
+           <div style={{ fontSize: '12px', color: 'var(--text-dim)', wordBreak: 'break-all' }} className="mono">
+-            {env?.weasel_root || '未识别'}
++            {env?.rime_user_dir || '未识别'}
+           </div>
+         </div>
+ 
+diff --git a/src/components/PhrasesView.tsx b/src/components/PhrasesView.tsx
+index 7b49f6d..eeef720 100644
+--- a/src/components/PhrasesView.tsx
++++ b/src/components/PhrasesView.tsx
+@@ -1,7 +1,7 @@
+ import React, { useState, useEffect } from 'react';
+ import { CustomPhraseItem, PhraseFileInfo } from '../types';
+ import { Plus, Trash2, Search, Save, Sparkles, X, RotateCcw, FolderOpen, ExternalLink, RotateCw, CheckCircle2, FileText, Zap } from 'lucide-react';
+-import { invoke } from '@tauri-apps/api/core';
++import { invoke } from '@tauri-apps/api/tauri';
+ 
+ interface PhrasesViewProps {
+   phrases: CustomPhraseItem[];
+diff --git a/src/components/RimeIceView.tsx b/src/components/RimeIceView.tsx
+index 390aac9..91b6a01 100644
+--- a/src/components/RimeIceView.tsx
++++ b/src/components/RimeIceView.tsx
+@@ -22,7 +22,7 @@ import {
+   X,
+   Cpu,
+ } from 'lucide-react';
+-import { invoke } from '@tauri-apps/api/core';
++import { invoke } from '@tauri-apps/api/tauri';
+ 
+ interface SchemaStateConfig {
+   schema_id: string;
+diff --git a/src/components/StatsView.tsx b/src/components/StatsView.tsx
+index ca88a12..499c814 100644
+--- a/src/components/StatsView.tsx
++++ b/src/components/StatsView.tsx
+@@ -1,5 +1,5 @@
+ import { useEffect, useMemo, useState } from 'react';
+-import { invoke } from '@tauri-apps/api/core';
++import { invoke } from '@tauri-apps/api/tauri';
+ import {
+   ChartColumnBig,
+   RefreshCw,
